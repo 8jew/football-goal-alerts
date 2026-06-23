@@ -1,0 +1,31 @@
+name: Test Goal Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture_id:
+        description: 'Fixture ID to test (e.g. 1101402)'
+        required: false
+        default: '1101402'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run test script
+        env:
+          API_SPORTS_KEY: ${{ secrets.API_SPORTS_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FIXTURE_ID: ${{ inputs.fixture_id }}
+        run: python test_goal_bot.py
