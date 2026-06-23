@@ -37,7 +37,7 @@ def get_live_fixtures():
     data = resp.json()
     return [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]
 
-# ----- Fetch fixtures for a specific date (for finished matches) -----
+# ----- Fetch fixtures for a specific date -----
 def get_fixtures_by_date(date_str, league_id):
     url = f"{API_BASE}/fixtures?league={league_id}&season=2026&date={date_str}"
     resp = requests.get(url, headers=HEADERS)
@@ -97,7 +97,7 @@ def send_final_result_embed(fixture):
 
     embed = {
         "title": f"🏁 FULL TIME",
-        "color": 0xE67E22,   # orange for final
+        "color": 0xE67E22,   # orange
         "fields": [
             {"name": "Match", "value": f"{home} vs {away}", "inline": False},
             {"name": "Score", "value": f"{home_score} - {away_score}", "inline": True},
@@ -114,10 +114,11 @@ def send_final_result_embed(fixture):
     else:
         print(f"❌ Discord error: {r.status_code} {r.text}")
 
-# ----- Check for newly finished matches -----
-def check_finished_matches(state):
+# ----- Check for finished matches -----
+def check_finished_matches(state, manual_mode=False):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     sent_finals = state.get("sent_finals", [])
+    now = datetime.now(timezone.utc)
 
     for league in LEAGUES:
         fixtures = get_fixtures_by_date(today, league)
@@ -127,21 +128,36 @@ def check_finished_matches(state):
         for fixture in fixtures:
             fid = str(fixture["fixture"]["id"])
             status = fixture["fixture"]["status"]["short"]
-            # If finished (FT, AET, PEN) and not yet sent
-            if status in ["FT", "AET", "PEN"] and fid not in sent_finals:
-                # But we only want matches that ended recently (e.g., within last 2 hours)
-                # Check timestamp
-                match_time = datetime.fromtimestamp(fixture["fixture"]["timestamp"], timezone.utc)
-                now = datetime.now(timezone.utc)
-                if (now - match_time).total_seconds() < 7200:  # within 2 hours
-                    send_final_result_embed(fixture)
-                    sent_finals.append(fid)
-                    state["sent_finals"] = sent_finals
-                    save_state(state)
-                    print(f"✅ Final result sent for {fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}")
+
+            # Only finished matches
+            if status not in ["FT", "AET", "PEN"]:
+                continue
+
+            # Skip if already sent
+            if fid in sent_finals:
+                continue
+
+            # Time limit: only send if within 2 hours, OR manual mode (send all)
+            match_time = datetime.fromtimestamp(fixture["fixture"]["timestamp"], timezone.utc)
+            time_diff = (now - match_time).total_seconds()
+
+            if not manual_mode and time_diff > 7200:  # 2 hours
+                continue
+
+            # Send result
+            send_final_result_embed(fixture)
+            sent_finals.append(fid)
+            state["sent_finals"] = sent_finals
+            save_state(state)
+            print(f"✅ Final result sent for {fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}")
 
 # ----- Main logic -----
 def main():
+    # Detect if manually triggered
+    manual_run = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    if manual_run:
+        print("🔁 Manual run detected – will send results of all finished matches today.")
+
     print("Checking for live fixtures...")
     fixtures = get_live_fixtures()
 
@@ -179,9 +195,9 @@ def main():
     else:
         print("No live matches in selected leagues.")
 
-    # Now check for finished matches that happened today
+    # Now check for finished matches
     print("Checking for recently finished matches...")
-    check_finished_matches(state)
+    check_finished_matches(state, manual_mode=manual_run)
 
 if __name__ == "__main__":
     main()
