@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ----- Configuration -----
 API_KEY = os.environ["API_SPORTS_KEY"]
@@ -9,10 +9,10 @@ DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 API_BASE = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
 
-# League IDs (Premier League: 39, La Liga: 140)
-LEAGUES = [1, 39, 140]   # 1 = FIFA World Cup
+# League IDs (World Cup: 1, Premier: 39, La Liga: 140)
+LEAGUES = [1, 39, 140]
 
-# State file to track already sent goals
+# State file
 STATE_FILE = "sent_goals.json"
 
 # ----- Helper: load / save state -----
@@ -32,24 +32,31 @@ def get_live_fixtures():
     url = f"{API_BASE}/fixtures?live=all"
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code != 200:
-        print(f"Error fetching fixtures: {resp.status_code} {resp.text}")
+        print(f"Error fetching fixtures: {resp.status_code}")
         return []
     data = resp.json()
-    fixtures = data.get("response", [])
-    # Filter only our leagues
-    return [f for f in fixtures if f["league"]["id"] in LEAGUES]
+    return [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]
 
-# ----- Fetch events for a specific fixture -----
+# ----- Fetch fixtures for a specific date (for finished matches) -----
+def get_fixtures_by_date(date_str, league_id):
+    url = f"{API_BASE}/fixtures?league={league_id}&season=2026&date={date_str}"
+    resp = requests.get(url, headers=HEADERS)
+    if resp.status_code != 200:
+        print(f"Error fetching fixtures for {date_str}: {resp.status_code}")
+        return []
+    return resp.json().get("response", [])
+
+# ----- Fetch events for a fixture -----
 def get_fixture_events(fixture_id):
     url = f"{API_BASE}/fixtures/events?fixture={fixture_id}"
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code != 200:
-        print(f"Error fetching events for fixture {fixture_id}: {resp.status_code}")
+        print(f"Error fetching events: {resp.status_code}")
         return []
     return resp.json().get("response", [])
 
-# ----- Send a single goal as an embed (no image) -----
-def send_goal_discord(goal, fixture):
+# ----- Send a goal embed -----
+def send_goal_embed(goal, fixture):
     player = goal["player"]["name"]
     minute = goal["time"]["elapsed"]
     if goal["time"].get("extra"):
@@ -62,7 +69,7 @@ def send_goal_discord(goal, fixture):
 
     embed = {
         "title": f"⚽ GOAL! {minute}'",
-        "color": 0x57F287,          # Discord green
+        "color": 0x57F287,
         "fields": [
             {"name": "Match", "value": f"{home} vs {away}", "inline": False},
             {"name": "Scorer", "value": player, "inline": True},
@@ -80,45 +87,101 @@ def send_goal_discord(goal, fixture):
     else:
         print(f"❌ Discord error: {r.status_code} {r.text}")
 
+# ----- Send final result embed -----
+def send_final_result_embed(fixture):
+    home = fixture["teams"]["home"]["name"]
+    away = fixture["teams"]["away"]["name"]
+    home_score = fixture["goals"]["home"] or 0
+    away_score = fixture["goals"]["away"] or 0
+    status = fixture["fixture"]["status"]["long"]
+
+    embed = {
+        "title": f"🏁 FULL TIME",
+        "color": 0xE67E22,   # orange for final
+        "fields": [
+            {"name": "Match", "value": f"{home} vs {away}", "inline": False},
+            {"name": "Score", "value": f"{home_score} - {away_score}", "inline": True},
+            {"name": "Status", "value": status, "inline": True}
+        ],
+        "footer": {"text": "📊 Match Result"},
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    payload = {"embeds": [embed]}
+    r = requests.post(DISCORD_WEBHOOK, json=payload)
+    if r.status_code == 204:
+        print(f"✅ Sent final result: {home} {home_score}-{away_score} {away}")
+    else:
+        print(f"❌ Discord error: {r.status_code} {r.text}")
+
+# ----- Check for newly finished matches -----
+def check_finished_matches(state):
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    sent_finals = state.get("sent_finals", [])
+
+    for league in LEAGUES:
+        fixtures = get_fixtures_by_date(today, league)
+        if not fixtures:
+            continue
+
+        for fixture in fixtures:
+            fid = str(fixture["fixture"]["id"])
+            status = fixture["fixture"]["status"]["short"]
+            # If finished (FT, AET, PEN) and not yet sent
+            if status in ["FT", "AET", "PEN"] and fid not in sent_finals:
+                # But we only want matches that ended recently (e.g., within last 2 hours)
+                # Check timestamp
+                match_time = datetime.fromtimestamp(fixture["fixture"]["timestamp"], timezone.utc)
+                now = datetime.now(timezone.utc)
+                if (now - match_time).total_seconds() < 7200:  # within 2 hours
+                    send_final_result_embed(fixture)
+                    sent_finals.append(fid)
+                    state["sent_finals"] = sent_finals
+                    save_state(state)
+                    print(f"✅ Final result sent for {fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}")
+
 # ----- Main logic -----
 def main():
     print("Checking for live fixtures...")
     fixtures = get_live_fixtures()
-    if not fixtures:
-        print("No live matches in selected leagues.")
-        return
 
     state = load_state()
     updated = False
 
-    for match in fixtures:
-        fid = match["fixture"]["id"]
-        print(f"Processing match {fid}: {match['teams']['home']['name']} vs {match['teams']['away']['name']}")
-        events = get_fixture_events(fid)
+    # Process live fixtures for goals
+    if fixtures:
+        for match in fixtures:
+            fid = match["fixture"]["id"]
+            print(f"Processing match {fid}: {match['teams']['home']['name']} vs {match['teams']['away']['name']}")
+            events = get_fixture_events(fid)
 
-        if str(fid) not in state:
-            state[str(fid)] = []
+            if str(fid) not in state:
+                state[str(fid)] = []
 
-        new_goals = []
-        for event in events:
-            if event["type"] == "Goal":
-                extra = event["time"].get("extra", 0)
-                key = f"{event['time']['elapsed']}-{extra}-{event['player']['name']}"
-                if key not in state[str(fid)]:
-                    new_goals.append(event)
-                    state[str(fid)].append(key)
-                    updated = True
+            new_goals = []
+            for event in events:
+                if event["type"] == "Goal":
+                    extra = event["time"].get("extra", 0)
+                    key = f"{event['time']['elapsed']}-{extra}-{event['player']['name']}"
+                    if key not in state[str(fid)]:
+                        new_goals.append(event)
+                        state[str(fid)].append(key)
+                        updated = True
 
-        new_goals.sort(key=lambda g: (g["time"]["elapsed"], g["time"].get("extra", 0)))
+            new_goals.sort(key=lambda g: (g["time"]["elapsed"], g["time"].get("extra", 0)))
 
-        for goal in new_goals:
-            send_goal_discord(goal, match)
+            for goal in new_goals:
+                send_goal_embed(goal, match)
 
-    if updated:
-        save_state(state)
-        print("State updated.")
+        if updated:
+            save_state(state)
+            print("State updated for goals.")
     else:
-        print("No new goals found.")
+        print("No live matches in selected leagues.")
+
+    # Now check for finished matches that happened today
+    print("Checking for recently finished matches...")
+    check_finished_matches(state)
 
 if __name__ == "__main__":
     main()
