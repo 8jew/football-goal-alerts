@@ -10,7 +10,7 @@ API_BASE = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
 
 # League IDs (Premier League: 39, La Liga: 140)
-LEAGUES = [39, 140]
+LEAGUES = [1, 39, 140]   # 1 = FIFA World Cup
 
 # State file to track already sent goals
 STATE_FILE = "sent_goals.json"
