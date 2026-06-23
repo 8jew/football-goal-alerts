@@ -1,19 +1,21 @@
-name: Test Goal Bot
+name: Goal Alerts
 
 on:
-  workflow_dispatch:
-    inputs:
-      fixture_id:
-        description: 'Fixture ID to test (e.g. 1101402)'
-        required: false
-        default: '1101402'
+  schedule:
+    - cron: '*/5 * * * *'   # Every 5 minutes
+  workflow_dispatch:         # Manual trigger
 
 jobs:
-  test:
+  alert:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -21,11 +23,18 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests   # Only requests
+        run: pip install requests   # Only requests, no Pillow
 
-      - name: Run test script
+      - name: Run goal alert script
         env:
           API_SPORTS_KEY: ${{ secrets.API_SPORTS_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          FIXTURE_ID: ${{ inputs.fixture_id }}
-        run: python test_goal_bot.py
+        run: python goal_alert.py
+
+      - name: Commit updated state file
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update sent goals state"
+          file_pattern: "sent_goals.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
