@@ -2,14 +2,14 @@ name: Goal Alerts
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # Every 5 minutes
-  workflow_dispatch:         # Allows manual run for testing
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   alert:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # So we can commit the state file
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -23,7 +23,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests Pillow
 
       - name: Run goal alert script
         env:
