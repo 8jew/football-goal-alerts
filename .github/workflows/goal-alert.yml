@@ -1,0 +1,40 @@
+name: Goal Alerts
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # Every 5 minutes
+  workflow_dispatch:         # Allows manual run for testing
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # So we can commit the state file
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run goal alert script
+        env:
+          API_SPORTS_KEY: ${{ secrets.API_SPORTS_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python goal_alert.py
+
+      - name: Commit updated state file
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update sent goals state"
+          file_pattern: "sent_goals.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
