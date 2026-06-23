@@ -2,8 +2,6 @@ import os
 import json
 import requests
 from datetime import datetime, timezone
-from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
 
 # ----- Configuration -----
 API_KEY = os.environ["API_SPORTS_KEY"]
@@ -11,10 +9,13 @@ DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 API_BASE = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
 
-LEAGUES = [39, 140]          # Premier League, La Liga
+# League IDs (Premier League: 39, La Liga: 140)
+LEAGUES = [39, 140]
+
+# State file to track already sent goals
 STATE_FILE = "sent_goals.json"
 
-# ----- State helpers -----
+# ----- Helper: load / save state -----
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
@@ -26,7 +27,7 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-# ----- API calls -----
+# ----- Fetch live fixtures -----
 def get_live_fixtures():
     url = f"{API_BASE}/fixtures?live=all"
     resp = requests.get(url, headers=HEADERS)
@@ -34,85 +35,48 @@ def get_live_fixtures():
         print(f"Error fetching fixtures: {resp.status_code} {resp.text}")
         return []
     data = resp.json()
-    return [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]
+    fixtures = data.get("response", [])
+    # Filter only our leagues
+    return [f for f in fixtures if f["league"]["id"] in LEAGUES]
 
+# ----- Fetch events for a specific fixture -----
 def get_fixture_events(fixture_id):
     url = f"{API_BASE}/fixtures/events?fixture={fixture_id}"
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code != 200:
-        print(f"Error fetching events: {resp.status_code}")
+        print(f"Error fetching events for fixture {fixture_id}: {resp.status_code}")
         return []
     return resp.json().get("response", [])
 
-# ----- Image generator -----
-def generate_match_image(fixture, goal):
-    home = fixture["teams"]["home"]["name"]
-    away = fixture["teams"]["away"]["name"]
-    home_score = fixture["goals"]["home"] or 0
-    away_score = fixture["goals"]["away"] or 0
+# ----- Send a single goal as an embed (no image) -----
+def send_goal_discord(goal, fixture):
     player = goal["player"]["name"]
     minute = goal["time"]["elapsed"]
-    extra = goal["time"].get("extra")
-    minute_str = f"{minute}'" + (f"+{extra}" if extra else "")
+    if goal["time"].get("extra"):
+        minute = f"{minute}+{goal['time']['extra']}"
+
+    home = fixture["teams"]["home"]["name"]
+    away = fixture["teams"]["away"]["name"]
+    score = f"{fixture['goals']['home']} - {fixture['goals']['away']}"
     team_scored = home if goal["team"]["id"] == fixture["teams"]["home"]["id"] else away
 
-    WIDTH, HEIGHT = 800, 400
-    bg = (30, 30, 40)
-    green = (87, 242, 135)
-    white = (255, 255, 255)
-
-    img = Image.new("RGB", (WIDTH, HEIGHT), bg)
-    draw = ImageDraw.Draw(img)
-
-    # Use default font (no external file needed)
-    font_big = ImageFont.load_default()
-    font_med = ImageFont.load_default()
-    font_small = ImageFont.load_default()
-
-    # Top green bar with "GOAL!"
-    draw.rectangle([0, 0, WIDTH, 70], fill=green)
-    draw.text((20, 10), f"⚽ GOAL!  {minute_str}", fill=(0, 0, 0), font=font_big)
-
-    # Team names
-    y = 100
-    draw.text((40, y), home, fill=white, font=font_med)
-    draw.text((40, y + 50), away, fill=white, font=font_med)
-
-    # Score (centered)
-    score_text = f"{home_score} - {away_score}"
-    bbox = draw.textbbox((0, 0), score_text, font=font_big)
-    score_x = (WIDTH - (bbox[2] - bbox[0])) // 2
-    draw.text((score_x, y), score_text, fill=green, font=font_big)
-
-    # Scorer info
-    draw.text((40, y + 110), f"Scorer: {player} ({team_scored})", fill=white, font=font_small)
-
-    # Footer
-    elapsed = fixture['fixture']['status'].get('elapsed', 0)
-    draw.text((40, HEIGHT - 40), f"Live • {elapsed}'", fill=(180, 180, 180), font=font_small)
-
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-    return buffer
-
-# ----- Send to Discord -----
-def send_goal_discord(goal, fixture):
-    img_buffer = generate_match_image(fixture, goal)
-    files = {"file": ("goal.png", img_buffer, "image/png")}
     embed = {
-        "title": "⚽ New Goal!",
-        "color": 0x57F287,
+        "title": f"⚽ GOAL! {minute}'",
+        "color": 0x57F287,          # Discord green
         "fields": [
-            {"name": "Match", "value": f"{fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}", "inline": False},
-            {"name": "Score", "value": f"{fixture['goals']['home']} - {fixture['goals']['away']}", "inline": True}
+            {"name": "Match", "value": f"{home} vs {away}", "inline": False},
+            {"name": "Scorer", "value": player, "inline": True},
+            {"name": "Score", "value": score, "inline": True},
+            {"name": "Team", "value": team_scored, "inline": True}
         ],
-        "image": {"url": "attachment://goal.png"}
+        "footer": {"text": "⚽ Live Goal Alert"},
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
     payload = {"embeds": [embed]}
-    r = requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files=files)
+    r = requests.post(DISCORD_WEBHOOK, json=payload)
     if r.status_code == 204:
-        print(f"✅ Sent goal image: {goal['player']['name']} {goal['time']['elapsed']}'")
+        print(f"✅ Sent goal: {player} {minute}' ({team_scored})")
     else:
         print(f"❌ Discord error: {r.status_code} {r.text}")
 
@@ -129,7 +93,7 @@ def main():
 
     for match in fixtures:
         fid = match["fixture"]["id"]
-        print(f"Processing {match['teams']['home']['name']} vs {match['teams']['away']['name']}")
+        print(f"Processing match {fid}: {match['teams']['home']['name']} vs {match['teams']['away']['name']}")
         events = get_fixture_events(fid)
 
         if str(fid) not in state:
